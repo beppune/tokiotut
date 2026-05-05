@@ -1,16 +1,20 @@
 
 use bytes::Bytes;
 use mini_redis::client;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+
+type Responder<T> = oneshot::Sender<mini_redis::Result<T>>;
 
 #[derive(Debug)]
 enum Command {
    Get {
        key: String,
+       resp: Responder<Option<Bytes>>,
    },
    Set {
        key: String,
        val: Bytes,
+       resp: Responder<()>,
    }
 }
 
@@ -20,13 +24,27 @@ async fn main() {
     let tx2 = tx.clone();
 
     let t1 = tokio::spawn(async move {
-        let cmd = Command::Get { key: "foo".to_string() };
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let cmd = Command::Get {
+            key:"foo".to_string(),
+            resp: resp_tx,
+        };
         tx.send(cmd).await.unwrap();
+
+        let resp = resp_rx.await;
+        print!("got {:?}\n", resp);
     });
 
     let t2 = tokio::spawn(async move {
-        let cmd = Command::Set { key: "foo".to_string(), val: "bar".into() };
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let cmd = Command::Set {
+            key: "foo".to_string(),
+            val: "bar".into(),
+            resp: resp_tx,
+        };
         tx2.send(cmd).await.unwrap();
+        let resp = resp_rx.await;
+        print!("got {:?}\n", resp);
     });
 
     let manager = tokio::spawn(async move {
@@ -37,14 +55,14 @@ async fn main() {
             use Command::*;
 
             match cmd {
-                Get { key } => {
-                    let _ = client.get(&key).await;
-                    print!("Get key: {}\n", &key);
+                Get { key, resp } => {
+                    let res = client.get(&key).await;
+                    let _ = resp.send(res);
                 },
-                Set { key, val } => {
+                Set { key, val, resp } => {
                     let v = val.clone();
-                    let _ = client.set(&key, val).await;
-                    print!("Set key: {} to {:?}\n", &key, v);
+                    let res = client.set(&key, val).await;
+                    let _ = resp.send(res);
                 }
             }
              
